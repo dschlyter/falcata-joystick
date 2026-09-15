@@ -1,4 +1,4 @@
-# Falcate Joystick
+# Falcata Joystick
 
 ASUS ROG Falcata analog key reader and virutal joystick.
 
@@ -10,7 +10,7 @@ Many games also do not support mixed gamepad + keyboard + mouse input very well.
 
 ## Web test
 
-Open the [standalone web page](hid-keyboard.html) to try it out.
+Open the [standalone web page](https://dschlyter.github.io/falcata-joystick/hid-keyboard.html) to try it out (Chrome or Edge, source in [hid-keyboard.html](hid-keyboard.html)).
 
 Note: This is effectively a **key logger**, which will log keys from your keyboard after you connect, even on other sites. All data stays locally, but to be sure close the tab before you do anything sensitive.
 
