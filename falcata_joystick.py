@@ -8,6 +8,7 @@ Usage:
     uv run falcata_joystick.py              # WASD = left stick (default, same as --wasd)
     uv run falcata_joystick.py --arrows     # arrows = right stick
     uv run falcata_joystick.py --both       # both sticks, slower polling
+    uv run falcata_joystick.py --map-w R --map-s L  # W = right trigger, S = left trigger
     uv run falcata_joystick.py --no-gamepad # print stick values only (no ViGEmBus needed)
 
 Python port of hid-keyboard.html. The firmware only reports travel for one key
@@ -36,6 +37,8 @@ MAX_EXTRAPOLATE_S = 0.05
 WASD = {"W": 18, "A": 31, "S": 32, "D": 33}
 ARROWS = {"Up": 83, "Down": 84, "Left": 79, "Right": 89}
 OPPOSITE = {18: 32, 32: 18, 31: 33, 33: 31, 83: 84, 84: 83, 79: 89, 89: 79}
+# firmware key code -> Windows virtual key code
+VIRTUAL_KEY = {18: 0x57, 31: 0x41, 32: 0x53, 33: 0x44, 83: 0x26, 84: 0x28, 79: 0x25, 89: 0x27}
 KEY_GROUPS = {
     "wasd": [list(WASD.values())],
     "arrows": [list(ARROWS.values())],
@@ -52,7 +55,23 @@ def main():
     parser.set_defaults(keys="wasd")
     parser.add_argument("--dwell-ms", type=int, default=10, help="time spent reading each polled key")
     parser.add_argument("--no-gamepad", action="store_true", help="print values instead of driving a gamepad")
+    parser.add_argument("--block-keys", action="store_true",
+                        help="stop tracked keys reaching other apps as normal key presses (Windows only)")
+    parser.add_argument("--map-w", choices=["L", "R"], help="W drives left/right trigger instead of the stick")
+    parser.add_argument("--map-s", choices=["L", "R"], help="S drives left/right trigger instead of the stick")
+    parser.add_argument("--allow-opposite", action="store_true",
+                        help="keep polling the opposite key while one is held, e.g. S while W is pressed (slower)")
     args = parser.parse_args()
+
+    triggers = {}  # "L"/"R" -> firmware key code
+    for side, key in [(args.map_w, WASD["W"]), (args.map_s, WASD["S"])]:
+        if side in triggers:
+            parser.error("--map-w and --map-s can't use the same trigger")
+        if side:
+            triggers[side] = key
+    if triggers and args.keys == "arrows":
+        parser.error("--map-w/--map-s need WASD tracking (--wasd or --both)")
+    opposite = {} if args.allow_opposite else OPPOSITE
 
     if sys.platform == "win32":
         # Windows timers tick every ~15.6ms by default, too coarse for a 10ms dwell (browsers raise this too)
@@ -60,13 +79,16 @@ def main():
 
     control, event = open_keyboard()
     output = PrintOutput() if args.no_gamepad else GamepadOutput()
-    reader = TravelReader(control, event, KEY_GROUPS[args.keys], args.dwell_ms / 1000)
+    groups = KEY_GROUPS[args.keys]
+    reader = TravelReader(control, event, groups, opposite, args.dwell_ms / 1000)
+    if args.block_keys:
+        block_keys({VIRTUAL_KEY[k] for g in groups for k in g})
 
     print(f"Listening - press {args.keys} keys (Ctrl+C to quit)")
     try:
         while True:
             reader.step()
-            output.update(stick_values(reader.current_travel()))
+            output.update(gamepad_values(reader.current_travel(), triggers))
     except KeyboardInterrupt:
         pass
     finally:
@@ -80,10 +102,11 @@ class TravelReader:
     - polling: explicitly select one key per step, see poll_sequence for the order
     """
 
-    def __init__(self, control, event, groups, dwell_s):
+    def __init__(self, control, event, groups, opposite, dwell_s):
         self.control = control
         self.event = event
         self.groups = groups
+        self.opposite = opposite
         self.keys = [k for g in groups for k in g]
         self.dwell_s = dwell_s
         self.travel = {k: 0 for k in self.keys}
@@ -108,7 +131,7 @@ class TravelReader:
 
         if not self.queue:
             self.expire_stale_keys()
-            self.queue = poll_sequence(self.groups, self.travel)
+            self.queue = poll_sequence(self.groups, self.travel, self.opposite)
         self.select_key(self.queue.pop(0))
         self.read_reports(self.dwell_s)
 
@@ -159,7 +182,7 @@ class TravelReader:
         write_command(self.control, 0x51, 0x61, payload)
 
 
-def poll_sequence(groups, travel):
+def poll_sequence(groups, travel, opposite=OPPOSITE):
     """One polling cycle. Tricks from the web version to keep held keys responsive:
     - with both groups enabled, only poll the group(s) being pressed
     - interleave held keys between each idle key, so they update most often
@@ -170,7 +193,7 @@ def poll_sequence(groups, travel):
     active = [k for k in keys if travel[k] > 0]
     if not active:
         return keys
-    idle = [k for k in keys if travel[k] == 0 and OPPOSITE[k] not in active]
+    idle = [k for k in keys if travel[k] == 0 and opposite.get(k) not in active]
     if not idle:
         return active
     return [k for idle_key in idle for k in [*active, idle_key]]
@@ -186,9 +209,11 @@ class GamepadOutput:
     def update(self, values):
         if values == self.last:
             return
-        lx, ly, rx, ry = values
+        lx, ly, rx, ry, lt, rt = values
         self.pad.left_joystick_float(lx, ly)
         self.pad.right_joystick_float(rx, ry)
+        self.pad.left_trigger_float(lt)
+        self.pad.right_trigger_float(rt)
         self.pad.update()
         self.last = values
 
@@ -200,22 +225,67 @@ class PrintOutput:
     def update(self, values):
         if values == self.last:
             return
-        lx, ly, rx, ry = values
+        lx, ly, rx, ry, lt, rt = values
         # overwrite one line, scrolling the Windows console is slow
-        print(f"L({lx:+.2f}, {ly:+.2f})  R({rx:+.2f}, {ry:+.2f})", end="\r", flush=True)
+        print(f"L({lx:+.2f}, {ly:+.2f})  R({rx:+.2f}, {ry:+.2f})  LT {lt:.2f}  RT {rt:.2f}", end="\r", flush=True)
         self.last = values
 
 
-def stick_values(travel):
-    """Returns (lx, ly, rx, ry) in -1..1, y up positive (XInput convention)."""
+def block_keys(virtual_keys):
+    """Swallow key presses with a low-level keyboard hook, so games only see the gamepad.
+    Analog travel is read from a separate HID collection and is unaffected."""
+    if sys.platform != "win32":
+        sys.exit("--block-keys is only supported on Windows")
+    import threading
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    HOOKPROC = ctypes.WINFUNCTYPE(wintypes.LPARAM, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+    user32.SetWindowsHookExW.argtypes = [ctypes.c_int, HOOKPROC, wintypes.HINSTANCE, wintypes.DWORD]
+    user32.SetWindowsHookExW.restype = wintypes.HHOOK
+    user32.CallNextHookEx.argtypes = [wintypes.HHOOK, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM]
+    user32.CallNextHookEx.restype = wintypes.LPARAM
+    kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+
+    @HOOKPROC
+    def on_key(n_code, w_param, l_param):
+        # l_param points to KBDLLHOOKSTRUCT, whose first field is the virtual key code
+        if n_code == 0 and ctypes.cast(l_param, ctypes.POINTER(wintypes.DWORD))[0] in virtual_keys:
+            return 1
+        return user32.CallNextHookEx(None, n_code, w_param, l_param)
+
+    def run():
+        # Must stay responsive: Windows silently removes hooks that take too long (~300ms)
+        WH_KEYBOARD_LL = 13
+        if not user32.SetWindowsHookExW(WH_KEYBOARD_LL, on_key, kernel32.GetModuleHandleW(None), 0):
+            print(f"Failed to block keys: {ctypes.WinError(ctypes.get_last_error())}")
+            return
+        msg = wintypes.MSG()
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            pass
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def gamepad_values(travel, triggers):
+    """triggers maps "L"/"R" to the key driving that trigger; those keys don't move the sticks.
+    Returns (lx, ly, rx, ry, lt, rt): sticks -1..1 with y up positive (XInput convention), triggers 0..1."""
+    on_stick = {k: v for k, v in travel.items() if k not in triggers.values()}
+
     def axis(neg, pos):
-        return clamp((travel.get(pos, 0) - travel.get(neg, 0)) / MAX_TRAVEL, -1.0, 1.0)
+        return clamp((on_stick.get(pos, 0) - on_stick.get(neg, 0)) / MAX_TRAVEL, -1.0, 1.0)
+
+    def trigger(side):
+        return clamp(travel.get(triggers.get(side), 0) / MAX_TRAVEL, 0.0, 1.0)
 
     return (
         axis(WASD["A"], WASD["D"]),
         axis(WASD["S"], WASD["W"]),
         axis(ARROWS["Left"], ARROWS["Right"]),
         axis(ARROWS["Down"], ARROWS["Up"]),
+        trigger("L"),
+        trigger("R"),
     )
 
 

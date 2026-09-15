@@ -2,9 +2,11 @@
 
 ASUS ROG Falcata analog key reader and virutal joystick.
 
-ASUS ROG Falcata has analog keys, but no official way to actually use it as analog input - this repo attempts to hack together a solution.
+ASUS ROG Falcata has analog keys, but no official way to actually use it as analog input - this repo attempts to hack together a workaround.
 
 The latency of the virtual controller is not great, due to limits in how keys are read in the keyboard - but should work for more casual games.
+
+Many games also do not support mixed gamepad + keyboard + mouse input very well. For example Decima engine games (Horizon, Death Stranding) or Pragmata.
 
 ## Web test
 
@@ -36,10 +38,12 @@ uv run falcata_joystick.py --no-gamepad  # check that key travel is read (prints
 uv run falcata_joystick.py               # WASD -> left stick
 uv run falcata_joystick.py --arrows      # arrows -> right stick
 uv run falcata_joystick.py --both        # both sticks (slower polling)
+uv run falcata_joystick.py --block-keys  # tracked keys no longer send normal key presses
+uv run falcata_joystick.py --map-w R --map-s L  # W -> right trigger, S -> left trigger (still analog)
 ```
 
-Leave it running while you play. Dependencies are installed automatically on the first run.
-
 Run `uv run falcata_joystick.py --help` for all options.
+
+Many games switch back and forth between gamepad and keyboard+mouse whenever they see both at once. `--block-keys` stops the tracked keys from also reaching the game as key presses, so it only sees the gamepad. You can't type those keys anywhere while it runs.
 
 Turn it off before you play any online multiplayer game as anti-cheat might not like the virtual controller being present.
