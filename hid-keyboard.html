@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>ROG Falcata Analog Reader</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: monospace; background: #1a1a2e; color: #e0e0e0; padding: 20px; }
+    h1 { color: #0ff; margin-bottom: 10px; }
+    button { background: #0ff; color: #1a1a2e; border: none; padding: 8px 16px; font-size: 14px; font-family: monospace; cursor: pointer; margin: 3px; }
+    button:hover { background: #0aa; }
+    button:disabled { background: #444; color: #888; cursor: default; }
+    .btn-small { padding: 4px 10px; font-size: 12px; }
+    .btn-danger { background: #f44; }
+    .btn-danger:hover { background: #c33; }
+    #error { color: #f44; margin: 5px 0; white-space: pre-wrap; }
+    .section { margin: 15px 0; padding: 10px; border: 1px solid #333; }
+    .section h2 { color: #0ff; font-size: 14px; margin-bottom: 8px; }
+    pre { white-space: pre-wrap; font-size: 12px; }
+    .log-area { height: 200px; overflow-y: auto; font-size: 11px; white-space: pre; background: #111; padding: 5px; margin-top: 5px; }
+    .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 10px 0; }
+    .hint { color: #888; font-size: 11px; margin: 5px 0; }
+    #axes { display: flex; gap: 20px; margin-top: 10px; }
+    .axis-viz { width: 200px; height: 200px; border: 1px solid #0ff; position: relative; background: #0001; }
+    .axis-viz canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+    .axis-crosshair { position: absolute; z-index: 1; }
+    .axis-crosshair.h { top: 50%; left: 0; right: 0; height: 1px; background: #333; }
+    .axis-crosshair.v { left: 50%; top: 0; bottom: 0; width: 1px; background: #333; }
+    .axis-dot { width: 12px; height: 12px; background: #0ff; border-radius: 50%; position: absolute; transform: translate(-50%, -50%); left: 50%; top: 50%; z-index: 2; }
+    .axis-label { text-align: center; font-size: 12px; margin-top: 4px; color: #888; }
+    .key-bar { display: inline-block; width: 60px; margin: 2px; text-align: center; }
+    .key-bar .bar-bg { height: 100px; background: #222; position: relative; border: 1px solid #444; }
+    .key-bar .bar-fill { position: absolute; bottom: 0; left: 0; right: 0; background: #0ff; transition: height 30ms; }
+    .key-bar .bar-label { font-size: 11px; margin-top: 2px; }
+    .key-bar .bar-value { font-size: 10px; color: #888; }
+    .status { padding: 4px 8px; border-radius: 3px; font-size: 12px; display: inline-block; margin: 2px; }
+    .status.ok { background: #0f02; color: #0f0; }
+    .status.missing { background: #f442; color: #f88; }
+    .status.waiting { background: #ff02; color: #ff0; }
+  </style>
+</head>
+<body>
+  <h1>ROG Falcata Analog Key Reader</h1>
+
+  <div class="section">
+    <h2>Connect</h2>
+    <div class="controls">
+      <button id="btn-authorize">Connect ASUS Keyboard</button>
+      <button id="btn-disconnect-all" class="btn-danger btn-small">Disconnect</button>
+    </div>
+    <div id="error"></div>
+    <div>
+      <span class="hint">Status: </span>
+      <span id="status-control" class="status missing">Control: not found</span>
+      <span id="status-event" class="status missing">Event: not found</span>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Analog Joystick</h2>
+    <div class="controls">
+      <label style="font-size:12px"><input type="checkbox" id="chk-wasd" checked> WASD (auto-poll)</label>
+      <label style="font-size:12px"><input type="checkbox" id="chk-arrows"> Arrows (auto-poll)</label>
+      <label style="font-size:12px"><input type="checkbox" id="chk-cross"> Cross-track groups</label>
+      <label style="font-size:12px">Dwell ms: <input type="number" id="poll-dwell" value="10" min="5" max="200" style="width:50px;background:#222;color:#e0e0e0;border:1px solid #555;font-family:monospace"></label>
+    </div>
+    <div id="travel-status" class="hint">Connect keyboard and press keys to start.</div>
+    <div style="display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap;margin-top:10px">
+      <div>
+        <div class="axis-viz">
+          <canvas id="trace-left" width="200" height="200"></canvas>
+          <div class="axis-crosshair h"></div>
+          <div class="axis-crosshair v"></div>
+          <div class="axis-dot" id="dot-left"></div>
+        </div>
+        <div class="axis-label">Left Stick (WASD)</div>
+      </div>
+      <div>
+        <div class="axis-viz">
+          <canvas id="trace-right" width="200" height="200"></canvas>
+          <div class="axis-crosshair h"></div>
+          <div class="axis-crosshair v"></div>
+          <div class="axis-dot" id="dot-right"></div>
+        </div>
+        <div class="axis-label">Right Stick (Arrows)</div>
+      </div>
+      <div id="key-bars" style="display:flex;flex-wrap:wrap;gap:2px;align-items:flex-end;min-height:130px"></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Raw Log</h2>
+    <div class="controls">
+      <button class="btn-small" onclick="$('raw-log').textContent=''">Clear</button>
+      <label style="font-size:12px"><input type="checkbox" id="chk-log" checked> Log reports</label>
+      <label style="font-size:12px"><input type="checkbox" id="chk-only-changes" checked> Only changes</label>
+    </div>
+    <div id="raw-log" class="log-area"></div>
+  </div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+const ASUS_VID = 0x0B05;
+const CONTROL_USAGE_PAGES = [0xFF00, 0xFF01, 0xFF02, 0xFF03];
+const EVENT_USAGE_PAGES = [0xFFC0, 0xFFC1, 0xFFC2, 0xFFC3];
+
+const WASD_KEYS = { W: 18, A: 31, S: 32, D: 33 };
+const ARROW_KEYS = { Up: 83, Down: 84, Left: 79, Right: 89 };
+const WASD_SET = new Set(Object.values(WASD_KEYS));
+const ARROW_SET = new Set(Object.values(ARROW_KEYS));
+const ALL_ANALOG_KEYS = new Set([...WASD_SET, ...ARROW_SET]);
+const MAX_TRAVEL = 350;
+const POLL_IDLE_TIMEOUT = 5000;
+
+const FW_KEY_NAMES = {
+  0:'Disabled',1:'`',2:'1',3:'2',4:'3',5:'4',6:'5',7:'6',8:'7',9:'8',10:'9',
+  11:'0',12:'-',13:'=',14:'¥',15:'Bksp',16:'Tab',17:'Q',18:'W',19:'E',20:'R',
+  21:'T',22:'Y',23:'U',24:'I',25:'O',26:'P',27:'[',28:']',29:'\\',30:'Caps',
+  31:'A',32:'S',33:'D',34:'F',35:'G',36:'H',37:'J',38:'K',39:'L',40:';',
+  41:"'",42:'#~',43:'Enter',44:'LShift',45:'IntlBS',46:'Z',47:'X',48:'C',
+  49:'V',50:'B',51:'N',52:'M',53:',',54:'.',55:'/',56:'Braz',57:'RShift',
+  58:'LCtrl',59:'LWin',60:'LAlt',61:'Space',62:'RAlt',63:'RWin',64:'RCtrl',
+  65:'Menu',75:'Ins',76:'Del',79:'Left',80:'Home',81:'End',83:'Up',84:'Down',
+  85:'PgUp',86:'PgDn',89:'Right',90:'NumLk',91:'Num7',92:'Num4',93:'Num1',
+  95:'Num/',96:'Num8',97:'Num5',98:'Num2',99:'Num0',100:'Num*',101:'Num9',
+  102:'Num6',103:'Num3',104:'Num.',105:'Num-',106:'Num+',108:'NumEnter',
+  110:'Esc',112:'F1',113:'F2',114:'F3',115:'F4',116:'F5',117:'F6',118:'F7',
+  119:'F8',120:'F9',121:'F10',122:'F11',123:'F12',124:'PrtSc',125:'ScrLk',
+  126:'Pause',131:'NCvt',132:'Cvt',133:'Kana',150:'Hanja',151:'Eng',
+  159:'Fn',184:'Mute',187:'Vol+',188:'Vol-',209:'WinLk',210:'Bright',
+};
+
+const AXIS_PAIRS = [
+  [WASD_KEYS.W, WASD_KEYS.S],
+  [WASD_KEYS.A, WASD_KEYS.D],
+  [ARROW_KEYS.Up, ARROW_KEYS.Down],
+  [ARROW_KEYS.Left, ARROW_KEYS.Right],
+];
+
+let controlDevice = null;
+let eventDevice = null;
+let controlReportId = 0;
+let allDevices = [];
+let reportCount = 0;
+let lastReportHex = '';
+
+const keyTravel = {};
+const keyLastSeen = {};
+const keyVelocity = {};
+let pollRunning = false;
+let lastActivityTime = 0;
+let singleKeyMode = true;
+
+const logBuffer = [];
+let logEnabled = false;
+
+$('btn-authorize').onclick = async () => {
+  try {
+    $('error').textContent = '';
+    await navigator.hid.requestDevice({ filters: [{ vendorId: ASUS_VID }] });
+    await enumerateAndConnect();
+  } catch (e) {
+    $('error').textContent = `Authorization failed: ${e.message}`;
+  }
+};
+
+$('btn-disconnect-all').onclick = disconnectAll;
+
+async function enumerateAndConnect() {
+  $('error').textContent = '';
+  const allHid = await navigator.hid.getDevices();
+  const asusDevices = allHid.filter(d => d.vendorId === ASUS_VID);
+
+  allDevices = [];
+  controlDevice = null;
+  eventDevice = null;
+
+  for (const d of asusDevices) {
+    const isControl = hasUsagePage(d, CONTROL_USAGE_PAGES);
+    const isEvent = hasUsagePage(d, EVENT_USAGE_PAGES);
+    const type = isControl ? 'control' : isEvent ? 'event' : 'other';
+    allDevices.push({ device: d, type, reportCount: 0 });
+
+    if (isControl && !controlDevice) {
+      controlDevice = d;
+      controlReportId = getReportId(d);
+    }
+    if (isEvent && !eventDevice) eventDevice = d;
+  }
+
+  await openDevices();
+  updateStatus();
+
+  if (controlDevice) {
+    await enableSingleKeyMode();
+  }
+}
+
+async function openDevices() {
+  for (const entry of allDevices) {
+    const d = entry.device;
+    if (!d.opened) {
+      try {
+        await d.open();
+        d.addEventListener('inputreport', e => onInputReport(entry, e));
+      } catch (e) {
+        logBuffer.push(`Failed to open ${d.productName || 'Unknown'}: ${e.message}`);
+      }
+    }
+  }
+}
+
+async function disconnectAll() {
+  pollRunning = false;
+  singleKeyMode = false;
+  for (const entry of allDevices) {
+    try { await entry.device.close(); } catch (_) {}
+  }
+  allDevices = [];
+  controlDevice = null;
+  eventDevice = null;
+  updateStatus();
+  $('travel-status').textContent = 'Disconnected.';
+  $('travel-status').style.color = '#888';
+}
+
+function hasUsagePage(device, pages) {
+  return device.collections.some(c => pages.includes(c.usagePage) && (c.usage === 1 || c.usage === undefined));
+}
+
+function getReportId(device) {
+  for (const c of device.collections) {
+    if (c.inputReports?.length) return c.inputReports[0].reportId;
+    if (c.outputReports?.length) return c.outputReports[0].reportId;
+  }
+  return 0;
+}
+
+function updateStatus() {
+  const sc = $('status-control');
+  const se = $('status-event');
+  if (controlDevice) {
+    sc.className = 'status ok';
+    sc.textContent = `Control: ${controlDevice.productName} (rpt=${controlReportId})`;
+  } else {
+    sc.className = 'status missing';
+    sc.textContent = 'Control: not found';
+  }
+  if (eventDevice) {
+    se.className = 'status ok';
+    se.textContent = `Event: ${eventDevice.productName}`;
+  } else {
+    se.className = 'status missing';
+    se.textContent = 'Event: not found';
+  }
+}
+
+function onInputReport(entry, e) {
+  entry.reportCount++;
+  reportCount++;
+  const { reportId, data } = e;
+  const bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+
+  if (logEnabled) {
+    const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(' ');
+    const isDup = $('chk-only-changes').checked && hex === lastReportHex;
+    lastReportHex = hex;
+    if (!isDup) {
+      const name = (entry.device.productName || '?').substring(0, 15);
+      logBuffer.push(`#${reportCount} [${name}|${entry.type}] rpt=${reportId} len=${bytes.length} | ${hex}`);
+    }
+  }
+
+  if (bytes.length < 2) return;
+  const cmd = bytes[0];
+
+  if (cmd === 126) {
+    const keyCode = bytes[2] << 8 | bytes[1];
+    const value = bytes[4] << 8 | bytes[3];
+    const now = performance.now();
+
+    if (pollRunning) {
+      if (value > 0) {
+        const prev = keyTravel[keyCode] || 0;
+        const prevTime = keyLastSeen[keyCode] || now;
+        const dt = now - prevTime;
+        if (dt > 1) keyVelocity[keyCode] = (value - prev) / dt;
+        keyTravel[keyCode] = value;
+        keyLastSeen[keyCode] = now;
+        lastActivityTime = now;
+      }
+    } else {
+      keyTravel[keyCode] = value;
+      keyLastSeen[keyCode] = now;
+      if (value > 0 && ALL_ANALOG_KEYS.has(keyCode)) {
+        lastActivityTime = now;
+        maybeStartPoll(keyCode);
+      }
+    }
+  }
+}
+
+function keyGroupEnabled(keyCode) {
+  if (WASD_SET.has(keyCode)) return $('chk-wasd').checked;
+  if (ARROW_SET.has(keyCode)) return $('chk-arrows').checked;
+  return false;
+}
+
+function maybeStartPoll(triggerKey) {
+  if (pollRunning || !controlDevice) return;
+  if (!keyGroupEnabled(triggerKey)) return;
+  startPoll();
+}
+
+async function enableSingleKeyMode() {
+  singleKeyMode = true;
+  const cmd = makeCommand(0x51, 0x61, []);
+  try { await sendCommandRaw(cmd); } catch (_) {}
+  $('travel-status').textContent = 'Listening — press WASD or arrow keys...';
+  $('travel-status').style.color = '#0f0';
+}
+
+function makeCommand(cmd, sub, indexOrPayload, maybePayload) {
+  const size = controlReportId === 0 ? 64 : 63;
+  const buf = new Uint8Array(size);
+  if (Array.isArray(indexOrPayload)) {
+    buf.set([cmd, sub, 0, 0, ...indexOrPayload]);
+  } else if (typeof indexOrPayload === 'number' && Array.isArray(maybePayload)) {
+    const lo = indexOrPayload & 0xFF;
+    const hi = (indexOrPayload >> 8) & 0xFF;
+    buf.set([cmd, sub, lo, hi, ...maybePayload]);
+  }
+  return buf;
+}
+
+async function sendCommandRaw(cmd) {
+  if (!controlDevice || !controlDevice.opened) return;
+  await controlDevice.sendReport(controlReportId, cmd.buffer);
+}
+
+function getPollKeys() {
+  const keys = [];
+  if ($('chk-wasd').checked) keys.push(WASD_KEYS.W, WASD_KEYS.A, WASD_KEYS.S, WASD_KEYS.D);
+  if ($('chk-arrows').checked) keys.push(ARROW_KEYS.Up, ARROW_KEYS.Down, ARROW_KEYS.Left, ARROW_KEYS.Right);
+  return keys;
+}
+
+function isActive(keyCode) {
+  return (keyTravel[keyCode] || 0) > 0;
+}
+
+function getOpposite(keyCode) {
+  for (const [a, b] of AXIS_PAIRS) {
+    if (keyCode === a) return b;
+    if (keyCode === b) return a;
+  }
+  return null;
+}
+
+function buildPollSequence() {
+  const crossTrack = $('chk-cross').checked;
+  const wasdEnabled = $('chk-wasd').checked;
+  const arrowsEnabled = $('chk-arrows').checked;
+
+  let primaryKeys = [];
+  let secondaryKeys = [];
+
+  const wasdActive = Object.values(WASD_KEYS).some(k => isActive(k));
+  const arrowsActive = Object.values(ARROW_KEYS).some(k => isActive(k));
+
+  if (wasdEnabled && arrowsEnabled) {
+    if (crossTrack) {
+      primaryKeys = [...Object.values(WASD_KEYS), ...Object.values(ARROW_KEYS)];
+    } else if (wasdActive && !arrowsActive) {
+      primaryKeys = Object.values(WASD_KEYS);
+    } else if (arrowsActive && !wasdActive) {
+      primaryKeys = Object.values(ARROW_KEYS);
+    } else if (wasdActive && arrowsActive) {
+      primaryKeys = [...Object.values(WASD_KEYS), ...Object.values(ARROW_KEYS)];
+    } else {
+      primaryKeys = Object.values(WASD_KEYS);
+      secondaryKeys = Object.values(ARROW_KEYS);
+    }
+  } else if (wasdEnabled) {
+    primaryKeys = Object.values(WASD_KEYS);
+  } else if (arrowsEnabled) {
+    primaryKeys = Object.values(ARROW_KEYS);
+  }
+
+  if (primaryKeys.length === 0) return [];
+
+  const enabled = [...primaryKeys, ...secondaryKeys];
+  const active = enabled.filter(k => isActive(k));
+  const inactive = enabled.filter(k => !isActive(k) && !active.includes(getOpposite(k)));
+
+  if (active.length === 0) return enabled;
+
+  const seq = [];
+  for (const inactiveKey of inactive) {
+    for (const activeKey of active) seq.push(activeKey);
+    seq.push(inactiveKey);
+  }
+  if (inactive.length === 0) {
+    for (const k of active) seq.push(k);
+  }
+  return seq;
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function pollKey(keyCode, dwell) {
+  const cmd = makeCommand(0x51, 0x61, [keyCode & 0xFF, (keyCode >> 8) & 0xFF]);
+  try { await sendCommandRaw(cmd); } catch (_) {}
+  await sleep(dwell);
+}
+
+async function startPoll() {
+  pollRunning = true;
+  $('travel-status').style.color = '#0f0';
+  let stepCount = 0;
+  const t0 = performance.now();
+
+  while (pollRunning) {
+    const now = performance.now();
+    if (now - lastActivityTime > POLL_IDLE_TIMEOUT) {
+      stopPoll();
+      break;
+    }
+
+    const dwell = parseInt($('poll-dwell').value) || 10;
+    const seq = buildPollSequence();
+    if (seq.length === 0) { await sleep(50); continue; }
+
+    for (const keyCode of seq) {
+      if (!pollRunning) break;
+      await pollKey(keyCode, dwell);
+      stepCount++;
+    }
+
+    if (stepCount % 20 === 0) {
+      const elapsed = (performance.now() - t0) / 1000;
+      const hz = (stepCount / elapsed).toFixed(0);
+      const active = getPollKeys().filter(k => isActive(k)).map(k => FW_KEY_NAMES[k] || k);
+      $('travel-status').textContent = `Polling ${hz} reads/s | active: ${active.join(', ') || 'none'} | dwell=${dwell}ms`;
+    }
+  }
+}
+
+function stopPoll() {
+  pollRunning = false;
+  for (const code of Object.keys(keyTravel)) {
+    keyTravel[code] = 0;
+    keyVelocity[code] = 0;
+  }
+  if (controlDevice) enableSingleKeyMode();
+}
+
+function getInterpolated(keyCode) {
+  const base = keyTravel[keyCode] || 0;
+  if (!pollRunning || base === 0) return base;
+  const lastTime = keyLastSeen[keyCode];
+  if (!lastTime) return base;
+  const dt = performance.now() - lastTime;
+  if (dt < 2) return base;
+  const vel = keyVelocity[keyCode] || 0;
+  const extrapolated = base + vel * Math.min(dt, 50);
+  return Math.max(0, Math.min(MAX_TRAVEL, extrapolated));
+}
+
+function updateKeyBars() {
+  const container = $('key-bars');
+  const entries = Object.entries(keyTravel).filter(([, v]) => v > 0);
+  entries.sort((a, b) => a[0] - b[0]);
+
+  container.innerHTML = '';
+  for (const [code, value] of entries) {
+    const pct = Math.min(100, (value / MAX_TRAVEL) * 100);
+    const keyName = FW_KEY_NAMES[code] || `fw${code}`;
+    const mm = (value * 0.01).toFixed(1);
+    const bar = document.createElement('div');
+    bar.className = 'key-bar';
+    bar.innerHTML = `
+      <div class="bar-bg"><div class="bar-fill" style="height:${pct}%"></div></div>
+      <div class="bar-label">${keyName}</div>
+      <div class="bar-value">${mm}mm</div>`;
+    container.appendChild(bar);
+  }
+}
+
+const traceLeft = { ctx: null, history: [] };
+const traceRight = { ctx: null, history: [] };
+const TRACE_MAX = 90;
+
+function initTraces() {
+  traceLeft.ctx = $('trace-left').getContext('2d');
+  traceRight.ctx = $('trace-right').getContext('2d');
+}
+
+function drawTrace(trace, x, y) {
+  trace.history.push({ x, y });
+  if (trace.history.length > TRACE_MAX) trace.history.shift();
+
+  const ctx = trace.ctx;
+  ctx.clearRect(0, 0, 200, 200);
+  const len = trace.history.length;
+  if (len < 2) return;
+
+  for (let i = 1; i < len; i++) {
+    const alpha = (i / len) * 0.4;
+    const width = (i / len) * 2.5;
+    ctx.beginPath();
+    ctx.strokeStyle = `rgba(0, 255, 255, ${alpha})`;
+    ctx.lineWidth = width;
+    ctx.moveTo(trace.history[i - 1].x, trace.history[i - 1].y);
+    ctx.lineTo(trace.history[i].x, trace.history[i].y);
+    ctx.stroke();
+  }
+}
+
+function updateAxes() {
+  const wVal = getInterpolated(WASD_KEYS.W);
+  const aVal = getInterpolated(WASD_KEYS.A);
+  const sVal = getInterpolated(WASD_KEYS.S);
+  const dVal = getInterpolated(WASD_KEYS.D);
+
+  const upVal = getInterpolated(ARROW_KEYS.Up);
+  const leftVal = getInterpolated(ARROW_KEYS.Left);
+  const downVal = getInterpolated(ARROW_KEYS.Down);
+  const rightVal = getInterpolated(ARROW_KEYS.Right);
+
+  const lxPct = ((dVal - aVal) / MAX_TRAVEL + 1) / 2 * 100;
+  const lyPct = ((sVal - wVal) / MAX_TRAVEL + 1) / 2 * 100;
+  $('dot-left').style.left = `${lxPct}%`;
+  $('dot-left').style.top = `${lyPct}%`;
+
+  const rxPct = ((rightVal - leftVal) / MAX_TRAVEL + 1) / 2 * 100;
+  const ryPct = ((downVal - upVal) / MAX_TRAVEL + 1) / 2 * 100;
+  $('dot-right').style.left = `${rxPct}%`;
+  $('dot-right').style.top = `${ryPct}%`;
+
+  if (traceLeft.ctx) drawTrace(traceLeft, lxPct * 2, lyPct * 2);
+  if (traceRight.ctx) drawTrace(traceRight, rxPct * 2, ryPct * 2);
+}
+
+function renderLoop() {
+  requestAnimationFrame(renderLoop);
+  logEnabled = $('chk-log').checked;
+
+  const now = performance.now();
+  for (const code of Object.keys(keyTravel)) {
+    const staleMs = pollRunning ? parseInt($('poll-dwell').value) * getPollKeys().length * 3 : 300;
+    if (keyTravel[code] > 0 && keyLastSeen[code] && (now - keyLastSeen[code]) > staleMs) {
+      keyTravel[code] = 0;
+      keyVelocity[code] = 0;
+    }
+  }
+
+  updateKeyBars();
+  updateAxes();
+
+  if (logBuffer.length > 0) {
+    const el = $('raw-log');
+    el.textContent += logBuffer.join('\n') + '\n';
+    logBuffer.length = 0;
+    const lines = el.textContent.split('\n');
+    if (lines.length > 500) el.textContent = lines.slice(-300).join('\n');
+    el.scrollTop = el.scrollHeight;
+  }
+}
+requestAnimationFrame(renderLoop);
+
+initTraces();
+
+if (!navigator.hid) {
+  $('error').textContent = 'WebHID not supported. Use Chrome or Edge.';
+  $('btn-authorize').disabled = true;
+}
+</script>
+</body>
+</html>
